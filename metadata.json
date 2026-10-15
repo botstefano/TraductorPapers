@@ -1,0 +1,7 @@
+{
+  "name": "TraductorPapers",
+  "description": "Traductor universal y en lote de papers científicos y documentos (EN → ES) con análisis de bibliografía y referencias cruzadas.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
