@@ -7,7 +7,12 @@ export async function buildBatchZip(documents: DocumentResult[]): Promise<Blob> 
 
   for (const doc of documents) {
     const baseName = doc.filename.replace(/\.[^/.]+$/, "") + "_ES";
-    const docxBlob = await buildTranslatedDocxBlob(doc.filename, doc.translatedText, doc.references);
+    const docxBlob = await buildTranslatedDocxBlob(
+      doc.filename,
+      doc.translatedText,
+      doc.references,
+      { paperTitle: doc.title }
+    );
     zip.file(`${baseName}.docx`, docxBlob);
     zip.file(`${baseName}.txt`, doc.translatedText);
   }

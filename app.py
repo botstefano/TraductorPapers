@@ -156,7 +156,9 @@ if run_button:
             other_titles = [t for t in all_titles if t != result.title]
             matches = cross_check_references(ref_items, other_titles, threshold=umbral)
 
-            docx_bytes = build_translated_docx(filename, result.translated_text, matches)
+            docx_bytes = build_translated_docx(
+                filename, result.translated_text, matches, paper_title=result.title, original_file_bytes=raw_bytes
+            )
             base_name = f"{os.path.splitext(filename)[0]}_ES"
             generated_docs[f"{base_name}.docx"] = docx_bytes
             generated_txts[f"{base_name}.txt"] = result.translated_text
@@ -210,7 +212,9 @@ if run_button:
                         is_translated_source=is_translated,
                     ))
 
-                docx_bytes = build_translated_docx(filename, body, matches)
+                docx_bytes = build_translated_docx(
+                    filename, body, matches, paper_title=preliminary_titles[idx - 1], original_file_bytes=raw_bytes
+                )
                 base_name = f"{os.path.splitext(filename)[0]}_ES"
                 generated_docs[f"{base_name}.docx"] = docx_bytes
                 generated_txts[f"{base_name}.txt"] = body
@@ -247,7 +251,9 @@ if run_button:
             other_titles = [t for j, t in enumerate(preliminary_titles) if j != idx - 1]
             matches = cross_check_references(ref_items, other_titles, threshold=umbral)
 
-            docx_bytes = build_translated_docx(filename, translated_body, matches)
+            docx_bytes = build_translated_docx(
+                filename, translated_body, matches, paper_title=preliminary_titles[idx - 1], original_file_bytes=raw_bytes
+            )
             base_name = f"{os.path.splitext(filename)[0]}_ES"
             generated_docs[f"{base_name}.docx"] = docx_bytes
             generated_txts[f"{base_name}.txt"] = translated_body

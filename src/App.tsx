@@ -294,7 +294,12 @@ export default function App() {
 
   const handleDownloadDocx = async (doc: DocumentResult) => {
     const base = doc.filename.replace(/\.[^/.]+$/, "") + "_ES.docx";
-    const blob = await buildTranslatedDocxBlob(doc.filename, doc.translatedText, doc.references);
+    const blob = await buildTranslatedDocxBlob(
+      doc.filename,
+      doc.translatedText,
+      doc.references,
+      { paperTitle: doc.title }
+    );
     downloadBlob(blob, base);
   };
 

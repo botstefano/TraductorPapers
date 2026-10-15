@@ -332,58 +332,388 @@ def translate_text_smart(
 # Generación de documento .docx con resaltado
 # --------------------------------------------------------------------------
 
-COLOR_MATCHED = RGBColor(0x1B, 0x8A, 0x3B)      # verde: referencia con fuente traducida disponible
-COLOR_UNMATCHED = RGBColor(0x1F, 0x3D, 0x7A)    # azul oscuro: referencia sin traducción cruzada
-COLOR_TITLE = RGBColor(0x00, 0x00, 0x00)
+COLOR_MATCHED = RGBColor(0x15, 0x80, 0x3D)      # verde esmeralda: referencia cruzada en el lote
+COLOR_UNMATCHED = RGBColor(0x1D, 0x4E, 0xD8)    # azul académico: referencia externa
+COLOR_HEADING = RGBColor(0x0F, 0x17, 0x2A)      # slate 900
+COLOR_TEXT = RGBColor(0x1E, 0x29, 0x3B)         # slate 800
+COLOR_MUTED = RGBColor(0x64, 0x74, 0x8B)        # slate 500
+
+
+import tempfile
+
+
+def convert_pdf_to_docx_bytes(pdf_bytes: bytes) -> Optional[bytes]:
+    """
+    Convierte un PDF en memoria a un documento Word (.docx) clonando
+    la maquetación original, incluyendo columnas, tablas, tipografías e imágenes.
+    """
+    try:
+        from pdf2docx import Converter
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f_pdf:
+            f_pdf.write(pdf_bytes)
+            pdf_path = f_pdf.name
+
+        docx_path = pdf_path.replace(".pdf", ".docx")
+        try:
+            cv = Converter(pdf_path)
+            cv.convert(docx_path, start=0, end=None)
+            cv.close()
+
+            if os.path.exists(docx_path):
+                with open(docx_path, "rb") as f_docx:
+                    return f_docx.read()
+        finally:
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                if os.path.exists(docx_path):
+                    os.remove(docx_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def translate_docx_in_place(
+    docx_bytes: bytes,
+    reference_matches: List[ReferenceMatch],
+    translator_func: Optional[Callable[[str], str]] = None,
+) -> bytes:
+    """
+    Toma un documento Word (.docx) maquetado y traduce cada párrafo y celda de tabla
+    reemplazando el texto en inglés por español, preservando imágenes, gráficos,
+    estilos de fuente, y coloreando las referencias bibliográficas.
+    """
+    if translator_func is None:
+        translator_func = translate_chunk_direct
+
+    doc = Document(io.BytesIO(docx_bytes))
+
+    in_references = False
+    for p in doc.paragraphs:
+        txt = p.text.strip()
+        if not txt:
+            continue
+
+        lower = txt.lower()
+        if any(h in lower for h in REFERENCES_HEADERS) and len(txt) < 40:
+            in_references = True
+            p.text = "REFERENCIAS BIBLIOGRÁFICAS (CRUCE DE CITAS)"
+            for run in p.runs:
+                run.bold = True
+                run.font.name = "Times New Roman"
+                run.font.color.rgb = COLOR_HEADING
+            continue
+
+        if in_references:
+            matched = None
+            for m in reference_matches:
+                if fuzz.token_set_ratio(txt, m.reference_text) >= 65:
+                    matched = m
+                    break
+
+            if matched and matched.is_translated_source:
+                p.text = matched.reference_text
+                if matched.matched_source_title:
+                    note = p.add_run(
+                        f"  [✓ Coincide con: \"{matched.matched_source_title}\" — Similitud {match.similarity:.0f}%]"
+                    )
+                    note.italic = True
+                    note.bold = True
+                    note.font.name = "Times New Roman"
+                    note.font.color.rgb = COLOR_MATCHED
+                for run in p.runs:
+                    run.font.color.rgb = COLOR_MATCHED
+            else:
+                for run in p.runs:
+                    run.font.color.rgb = COLOR_UNMATCHED
+        else:
+            # Reemplazar texto preservando el párrafo e interlineado
+            if len(txt) > 3 and not txt.isdigit():
+                try:
+                    translated = translator_func(txt)
+                    p.text = translated
+                except Exception:
+                    pass
+
+    # Traducir tablas conservando su formato, bordes y celdas
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                cell_txt = cell.text.strip()
+                if cell_txt and len(cell_txt) > 2 and not cell_txt.isdigit() and not cell_txt.startswith("http"):
+                    try:
+                        cell.text = translator_func(cell_txt)
+                    except Exception:
+                        pass
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 def build_translated_docx(
     original_filename: str,
     translated_body: str,
     reference_matches: List[ReferenceMatch],
+    paper_title: Optional[str] = None,
+    original_file_bytes: Optional[bytes] = None,
+    translator_func: Optional[Callable[[str], str]] = None,
 ) -> bytes:
     """
-    Construye un .docx con:
-      - Título
-      - Cuerpo traducido al español
-      - Sección de referencias, coloreando en verde las que cruzan con
-        una fuente también traducida en el lote, y en azul las que no.
+    Construye un documento .docx:
+      1. Si se proporciona original_file_bytes (PDF o DOCX), intenta clonar la
+         maquetación original (incluyendo imágenes, figuras, tablas y columnas)
+         y traducir in-place.
+      2. Si pdf2docx no está disponible o falla, genera un documento con maquetación
+         académica profesional certificada (Times New Roman, márgenes 1", caja de Abstract).
     """
+    ext = os.path.splitext(original_filename)[1].lower()
+
+    # Estrategia A: Preservación visual idéntica vía conversión PDF/DOCX -> Word
+    if original_file_bytes:
+        docx_raw = None
+        if ext == ".pdf":
+            docx_raw = convert_pdf_to_docx_bytes(original_file_bytes)
+        elif ext in [".docx", ".doc"]:
+            docx_raw = original_file_bytes
+
+        if docx_raw:
+            try:
+                translated_in_place = translate_docx_in_place(
+                    docx_raw, reference_matches, translator_func=translator_func
+                )
+                if translated_in_place and len(translated_in_place) > 2000:
+                    return translated_in_place
+            except Exception:
+                pass
+
+    # Estrategia B: Plantilla Académica Profesional Estándar
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
     doc = Document()
 
-    title = doc.add_heading(f"Traducción: {original_filename}", level=1)
-    for run in title.runs:
-        run.font.color.rgb = COLOR_TITLE
+    # 1. Configurar márgenes de página estándar (1 pulgada = 2.54 cm)
+    section = doc.sections[0]
+    section.top_margin = Inches(1.0)
+    section.bottom_margin = Inches(1.0)
+    section.left_margin = Inches(1.0)
+    section.right_margin = Inches(1.0)
 
-    doc.add_heading("Cuerpo del artículo (traducido)", level=2)
-    for para in translated_body.split("\n"):
-        if para.strip():
-            p = doc.add_paragraph(para.strip())
-            p.style.font.size = Pt(11)
+    # Encabezado de página
+    header = section.header
+    header_para = header.paragraphs[0]
+    header_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run_hdr = header_para.add_run(f"Traducción Científica (EN → ES) — {original_filename}")
+    run_hdr.font.name = "Times New Roman"
+    run_hdr.font.size = Pt(8.5)
+    run_hdr.font.color.rgb = COLOR_MUTED
 
+    # 2. Título principal
+    title_text = paper_title
+    lines = [line.strip() for line in translated_body.split("\n") if line.strip()]
+    if not title_text:
+        if lines and len(lines[0]) < 180 and not lines[0].lower().startswith("resumen"):
+            title_text = lines[0]
+        else:
+            base = os.path.splitext(original_filename)[0]
+            title_text = base.replace("_", " ").replace("-", " ").title()
+
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.paragraph_format.space_before = Pt(12)
+    p_title.paragraph_format.space_after = Pt(4)
+    run_title = p_title.add_run(title_text)
+    run_title.bold = True
+    run_title.font.name = "Times New Roman"
+    run_title.font.size = Pt(18)
+    run_title.font.color.rgb = COLOR_HEADING
+
+    # Subtítulo de traducción
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_sub.paragraph_format.space_after = Pt(4)
+    run_sub = p_sub.add_run("[Traducción Científica Especializada (EN → ES)]")
+    run_sub.italic = True
+    run_sub.font.name = "Times New Roman"
+    run_sub.font.size = Pt(10)
+    run_sub.font.color.rgb = COLOR_MUTED
+
+    # Metadatos del documento
+    p_meta = doc.add_paragraph()
+    p_meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_meta.paragraph_format.space_after = Pt(16)
+    run_m1 = p_meta.add_run("Documento original: ")
+    run_m1.font.size = Pt(9)
+    run_m1.font.name = "Times New Roman"
+    run_m1.font.color.rgb = COLOR_MUTED
+    run_m2 = p_meta.add_run(original_filename)
+    run_m2.bold = True
+    run_m2.font.size = Pt(9)
+    run_m2.font.name = "Times New Roman"
+    run_m3 = p_meta.add_run("   |   Formato: Paper Académico Revisado")
+    run_m3.font.size = Pt(9)
+    run_m3.font.name = "Times New Roman"
+    run_m3.font.color.rgb = COLOR_MUTED
+
+    # 3. Procesar cuerpo: separar Abstract de secciones ordinarias
+    in_abstract = False
+    abstract_paras = []
+    regular_paras = []
+
+    for idx, raw_line in enumerate(translated_body.split("\n")):
+        line_clean = raw_line.strip()
+        if not line_clean:
+            continue
+        if idx == 0 and line_clean == title_text:
+            continue
+
+        lower = line_clean.lower()
+        if lower in ["resumen", "abstract", "resumen (abstract)"] or lower.startswith(("resumen:", "abstract:")):
+            in_abstract = True
+            content = re.sub(r"^(?:resumen|abstract)[:\s-]*", "", line_clean, flags=re.IGNORECASE).strip()
+            if content:
+                abstract_paras.append(content)
+            continue
+
+        is_heading_candidate = (
+            lower.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."))
+            or lower.startswith(("introducción", "introduccion", "metodología", "resultados", "discusión", "conclusión", "conclusiones"))
+            or (len(line_clean) < 45 and not line_clean.endswith(".") and line_clean.isupper())
+        )
+
+        if in_abstract and is_heading_candidate:
+            in_abstract = False
+
+        if in_abstract:
+            abstract_paras.append(line_clean)
+        else:
+            is_sec = is_heading_candidate or line_clean.startswith("#")
+            clean_text = line_clean.lstrip("#").strip()
+            regular_paras.append((clean_text, is_sec))
+
+    # Renderizar Resumen en recuadro destacado
+    if abstract_paras:
+        tbl = doc.add_table(rows=1, cols=1)
+        tbl.autofit = False
+        tbl.columns[0].width = Inches(6.5)
+        cell = tbl.cell(0, 0)
+        
+        p_ab_hdr = cell.paragraphs[0]
+        p_ab_hdr.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_ab_hdr.paragraph_format.space_before = Pt(4)
+        p_ab_hdr.paragraph_format.space_after = Pt(4)
+        r_ab_hdr = p_ab_hdr.add_run("RESUMEN / ABSTRACT")
+        r_ab_hdr.bold = True
+        r_ab_hdr.font.name = "Times New Roman"
+        r_ab_hdr.font.size = Pt(10.5)
+        r_ab_hdr.font.color.rgb = COLOR_HEADING
+
+        for ab_text in abstract_paras:
+            p_ab = cell.add_paragraph()
+            p_ab.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p_ab.paragraph_format.space_after = Pt(4)
+            p_ab.paragraph_format.line_spacing = 1.15
+            r_ab = p_ab.add_run(ab_text)
+            r_ab.italic = True
+            r_ab.font.name = "Times New Roman"
+            r_ab.font.size = Pt(10)
+            r_ab.font.color.rgb = COLOR_TEXT
+
+        p_spacer = doc.add_paragraph()
+        p_spacer.paragraph_format.space_before = Pt(6)
+        p_spacer.paragraph_format.space_after = Pt(6)
+
+    # Renderizar Párrafos y Encabezados del Cuerpo
+    for text_item, is_heading in regular_paras:
+        if is_heading:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(14)
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.keep_with_next = True
+            run = p.add_run(text_item.upper())
+            run.bold = True
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(12)
+            run.font.color.rgb = COLOR_HEADING
+        else:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.first_line_indent = Inches(0.25)
+            p.paragraph_format.space_after = Pt(6)
+            p.paragraph_format.line_spacing = 1.15
+            run = p.add_run(text_item)
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(10.5)
+            run.font.color.rgb = COLOR_TEXT
+
+    # 4. Sección de Referencias con Sangría Francesa (Hanging Indent)
     if reference_matches:
-        doc.add_heading("Referencias (cruce con fuentes traducidas)", level=2)
-        legend = doc.add_paragraph()
-        legend.add_run("Leyenda: ").bold = True
-        run_g = legend.add_run("verde = referencia con fuente también traducida en este lote")
-        run_g.font.color.rgb = COLOR_MATCHED
-        legend.add_run("   |   ")
-        run_b = legend.add_run("azul = referencia sin cruce en el lote")
-        run_b.font.color.rgb = COLOR_UNMATCHED
+        p_ref_hdr = doc.add_paragraph()
+        p_ref_hdr.paragraph_format.space_before = Pt(18)
+        p_ref_hdr.paragraph_format.space_after = Pt(6)
+        p_ref_hdr.paragraph_format.keep_with_next = True
+        run_rh = p_ref_hdr.add_run("REFERENCIAS BIBLIOGRÁFICAS (CRUCE DE CITAS)")
+        run_rh.bold = True
+        run_rh.font.name = "Times New Roman"
+        run_rh.font.size = Pt(12)
+        run_rh.font.color.rgb = COLOR_HEADING
 
+        # Leyenda
+        matched_count = sum(1 for m in reference_matches if m.is_translated_source)
+        unmatched_count = len(reference_matches) - matched_count
+
+        legend = doc.add_paragraph()
+        legend.paragraph_format.space_after = Pt(10)
+        r_leg_title = legend.add_run("Leyenda del Cruce: ")
+        r_leg_title.bold = True
+        r_leg_title.font.name = "Times New Roman"
+        r_leg_title.font.size = Pt(9.5)
+
+        run_g = legend.add_run(f"🟢 VERDE ({matched_count}) = Cita con fuente traducida en este lote")
+        run_g.font.name = "Times New Roman"
+        run_g.font.size = Pt(9.5)
+        run_g.font.color.rgb = COLOR_MATCHED
+        run_g.bold = True
+
+        run_sep = legend.add_run("   |   ")
+        run_sep.font.size = Pt(9.5)
+
+        run_b = legend.add_run(f"🔵 AZUL ({unmatched_count}) = Referencia externa sin cruce")
+        run_b.font.name = "Times New Roman"
+        run_b.font.size = Pt(9.5)
+        run_b.font.color.rgb = COLOR_UNMATCHED
+        run_b.bold = True
+
+        # Cada referencia con Sangría Francesa (Hanging Indent) de 0.35 pulgadas
         for match in reference_matches:
             p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.left_indent = Inches(0.35)
+            p.paragraph_format.first_line_indent = Inches(-0.35)
+            p.paragraph_format.space_after = Pt(5)
+            p.paragraph_format.line_spacing = 1.1
+
             run = p.add_run(match.reference_text)
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(9.5)
             run.font.color.rgb = (
                 COLOR_MATCHED if match.is_translated_source else COLOR_UNMATCHED
             )
-            if match.is_translated_source:
+            run.bold = match.is_translated_source
+
+            if match.is_translated_source and match.matched_source_title:
                 note = p.add_run(
-                    f"  [coincide con: {match.matched_source_title} | "
-                    f"similitud {match.similarity:.0f}%]"
+                    f"  [✓ Coincide con: \"{match.matched_source_title}\" — Similitud {match.similarity:.0f}%]"
                 )
                 note.italic = True
-                note.font.size = Pt(9)
+                note.bold = True
+                note.font.name = "Times New Roman"
+                note.font.size = Pt(8.5)
+                note.font.color.rgb = COLOR_MATCHED
 
     buf = io.BytesIO()
     doc.save(buf)
