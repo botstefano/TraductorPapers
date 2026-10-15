@@ -1,39 +1,86 @@
-# TraductorPapers - Traductor en lote de papers científicos (EN → ES)
+# Traductor en lote de papers científicos (EN → ES)
 
-Aplicación web moderna desarrollada en **React + TypeScript + Vite + Express (Node.js)** reescrita a partir de la versión en Streamlit para traducción académica en lote con análisis de bibliografía y referencias cruzadas.
+Aplicación en **Python + Streamlit** para la tarea de la Semana 3:
+sube 10 papers científicos en inglés (PDF, de los últimos 5 años),
+la app los traduce **en lote** al español usando la **API de Gemini**
+(o, para nota extra, **agentes de LangChain**), y genera un `.docx`
+por cada paper con las **referencias resaltadas en color** según si
+cruzan (fuzzy match) con otra fuente también traducida en el mismo lote.
 
-## ✨ Características Principales
-
-- **Universalidad de documentos**: Procesa cualquier documento o paper en inglés (.pdf, .docx, .txt, .md) individualmente o en lotes de hasta 10+ documentos.
-- **Entrada de API visual y no bloqueante**: La barra lateral dispone del campo para ingresar la Google Gemini API Key, mostrando el estado de conexión sin detener la ejecución si no se cuenta con una clave activa.
-- **Modos de traducción**:
-  - **Gemini directo (document processing)**: Envío y traducción con modelos Google Gemini de última generación (`gemini-3.8-flash`, `gemini-4-argon`, etc.).
-  - **Agentes LangChain / Autónomos**: Pipeline estructurado de 3 etapas para análisis jerárquico, traducción técnica rigurosa y extracción de bibliografía.
-  - **Motor Autónomo Ultrarrápido**: Motor de traducción autónomo y tolerante a fallos con segmentación inteligente de párrafos y caché en memoria.
-- **Cruce de referencias con colores**: Detección y cotejo difuso (*token-set ratio*) de las citas bibliográficas del documento original contra los títulos de los otros papers del lote actual:
-  - 🟢 **Verde (`#1B8A3B`)**: Referencia con fuente también traducida en este lote, con porcentaje de similitud.
-  - 🔵 **Azul (`#1F3D7A`)**: Referencia sin cruce directo en el lote.
-- **Salida multiformato**:
-  - Descarga individual en Microsoft Word estructurado (`.docx`) con formato y colores en citas.
-  - Descarga individual en texto plano (`.txt`).
-  - Descarga masiva de todo el lote en archivo comprimido (`.zip`).
-- **Lote de prueba con 1 clic**: Incluye 5 papers seminales de IA y Computer Science con citas cruzadas entre sí para probar inmediatamente sin requerir archivos externos.
-
-## 🚀 Puesta en Marcha
+## 1. Instalación
 
 ```bash
-# Instalar dependencias
-npm install
-
-# Iniciar servidor de desarrollo (dev server en puerto 3000)
-npm run dev
-
-# Compilar para producción
-npm run build
+cd paper_translator
+python -m venv venv
+source venv/bin/activate      # En Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-## ⚙️ Configuración
+## 2. Configura tu API Key de Gemini
 
-Puedes especificar tu clave de API de Gemini a través de:
-1. Variable de entorno en `.env`: `GOOGLE_API_KEY=tu_clave` o `GEMINI_API_KEY=tu_clave`
-2. El campo interactivo de la barra lateral en la aplicación web.
+Opción A — variable de entorno:
+```bash
+cp .env.example .env
+# edita .env y pega tu API key (https://aistudio.google.com/app/apikey)
+```
+
+Opción B — pegarla directamente en el campo de la barra lateral de la app
+al ejecutarla (no se guarda en disco).
+
+## 3. Ejecutar la aplicación
+
+```bash
+streamlit run app.py
+```
+
+Se abrirá en `http://localhost:8501`.
+
+## 4. Uso
+
+1. En la barra lateral, ingresa tu **API Key de Gemini** y elige el modo:
+   - **Gemini directo (document processing)**: envía cada PDF completo al
+     modelo Gemini, que lo traduce usando su capacidad nativa de lectura
+     de documentos (sin OCR manual). Ver:
+     https://ai.google.dev/gemini-api/docs/document-processing?hl=es-419
+   - **Agentes LangChain (nota extra)**: un `AgentExecutor` decide, con
+     herramientas propias (`extract_pdf_text`, `extract_references_section`,
+     `cross_check_references_tool`), cómo extraer, traducir y cruzar
+     referencias.
+2. Sube tus **10 papers en PDF** (arrastra o selecciona varios a la vez).
+3. Presiona **"Traducir lote"**.
+4. Descarga cada `.docx` individual o el `.zip` con todos.
+
+## 5. Cómo se cumplen los criterios de la tarea
+
+| Requisito                                                                 | Dónde se resuelve |
+|----------------------------------------------------------------------------|--------------------|
+| 10 papers en inglés (últimos 5 años) + su traducción (20 en total)         | El usuario los sube; la app produce 1 `.docx` traducido por cada PDF subido. |
+| App en Python + Streamlit que lea y traduzca ficheros **en lote**          | `app.py`: `st.file_uploader(accept_multiple_files=True)` + bucle de traducción sobre todos los archivos. |
+| Uso de API del traductor / **API de Gemini** / agentes LangChain o n8n     | `gemini_translator.py` (Gemini directo) y `langchain_agent.py` (agente con tools). |
+| Revisión del contenido del artículo                                        | El cuerpo completo se traduce y se muestra íntegro en el `.docx` de salida. |
+| Referencias cruzadas con las fuentes traducidas, **marcadas de color diferente** | `utils.py::cross_check_references` (fuzzy matching) + `build_translated_docx` (verde = con cruce, azul = sin cruce). |
+
+## 6. Estructura del proyecto
+
+```
+paper_translator/
+├── app.py                 # Interfaz Streamlit (orquestador principal)
+├── gemini_translator.py   # Traducción directa vía API de Gemini (document processing)
+├── langchain_agent.py     # Modo con AGENTES LangChain (nota extra)
+├── utils.py                # Extracción de PDF, parseo de referencias, cruce y generación de .docx
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+## 7. Notas
+
+- El **cruce de referencias** es *dentro del propio lote*: se compara cada
+  referencia citada por un paper contra los **títulos de los otros papers
+  que subiste y tradujiste en la misma corrida**. Si tus 10 papers no se
+  citan entre sí, es normal que la mayoría quede en azul ("sin cruce");
+  eso es exactamente lo que se espera que la revisión en vivo muestre.
+- Puedes ajustar el **umbral de similitud** (slider en la barra lateral)
+  si el cruce es demasiado estricto o demasiado permisivo.
+- El modo de **agentes LangChain** otorga nota extra según la indicación
+  del profesor ("quien lo haga usando agentes tendrá más nota").

@@ -15,11 +15,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Body parser for JSON with large files (PDF base64)
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Ensure valid Google API key from environment if placeholder was set
+if (
+  (!process.env.GOOGLE_API_KEY || process.env.GOOGLE_API_KEY.includes("tu_api_key")) &&
+  process.env.GEMINI_API_KEY
+) {
+  process.env.GOOGLE_API_KEY = process.env.GEMINI_API_KEY;
+}
 
 // In-memory translation cache
 const translationCache = new Map<string, string>();
@@ -83,21 +91,33 @@ async function translateChunkPublic(chunk: string): Promise<string> {
   return clean;
 }
 
+// Helper to run promises with limited concurrency
+async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+
+  async function worker() {
+    while (currentIndex < items.length) {
+      const index = currentIndex++;
+      results[index] = await fn(items[index]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 async function translateParagraphsSmart(text: string): Promise<string> {
   if (!text || !text.trim()) return "";
 
   const paragraphs = text.split("\n");
-  const translatedParas: string[] = [];
 
-  for (const para of paragraphs) {
+  const translatedParas = await mapConcurrent(paragraphs, 6, async (para) => {
     const trimmed = para.trim();
-    if (!trimmed) {
-      translatedParas.push("");
-      continue;
-    }
+    if (!trimmed) return "";
 
     if (trimmed.length > 800) {
-      // Split into sentences
       const sentences = trimmed.split(/(?<=[.?!])\s+/);
       const chunks: string[] = [];
       let cur = "";
@@ -112,15 +132,12 @@ async function translateParagraphsSmart(text: string): Promise<string> {
       }
       if (cur) chunks.push(cur);
 
-      const translatedChunks = await Promise.all(
-        chunks.map((c) => translateChunkPublic(c))
-      );
-      translatedParas.push(translatedChunks.join(" "));
+      const translatedChunks = await Promise.all(chunks.map((c) => translateChunkPublic(c)));
+      return translatedChunks.join(" ");
     } else {
-      const translated = await translateChunkPublic(trimmed);
-      translatedParas.push(translated);
+      return await translateChunkPublic(trimmed);
     }
-  }
+  });
 
   return translatedParas.join("\n");
 }
@@ -136,6 +153,27 @@ function resolveGeminiModel(requestedModel?: string): string {
     return "gemini-4-argon";
   }
   return "gemini-3.8-flash";
+}
+
+function buildTextFromSortedItems(sortedItems: any[]): string {
+  let text = "";
+  let lastY: number | null = null;
+  let lastX = 0;
+  for (const item of sortedItems) {
+    if (lastY === null) {
+      text += item.str;
+    } else if (Math.abs(lastY - item.transform[5]) > 4) {
+      text += "\n" + item.str;
+    } else {
+      if (item.transform[4] - lastX > 4 && !text.endsWith(" ") && !item.str.startsWith(" ")) {
+        text += " ";
+      }
+      text += item.str;
+    }
+    lastY = item.transform[5];
+    lastX = item.transform[4] + (item.width || 0);
+  }
+  return text;
 }
 
 // --------------------------------------------------------------------------
@@ -156,7 +194,54 @@ app.post("/api/extract-document", async (req: Request, res: Response) => {
 
     if (ext === ".pdf") {
       try {
-        const parsed = await pdfParse(buffer);
+        const parsed = await pdfParse(buffer, {
+          pagerender: (pageData: any) => {
+            return pageData.getTextContent({ normalizeWhitespace: true }).then((textContent: any) => {
+              const items = textContent.items;
+              if (!items || items.length === 0) return "";
+
+              const xs = items.map((it: any) => it.transform[4]);
+              const minX = Math.min(...xs);
+              const maxX = Math.max(...xs);
+              const midX = (minX + maxX) / 2;
+
+              // Check if items cluster in two distinct columns (typical of scientific IEEE / ACM / arXiv papers)
+              const leftItems = items.filter((it: any) => it.transform[4] < midX - 25);
+              const rightItems = items.filter((it: any) => it.transform[4] > midX + 25);
+              const isTwoCol =
+                items.length > 25 &&
+                leftItems.length > items.length * 0.25 &&
+                rightItems.length > items.length * 0.25;
+
+              const sortFn = (a: any, b: any) => {
+                if (Math.abs(b.transform[5] - a.transform[5]) > 4) {
+                  return b.transform[5] - a.transform[5];
+                }
+                return a.transform[4] - b.transform[4];
+              };
+
+              if (isTwoCol) {
+                // Top header / title items (y > 700 or wide items spanning both columns)
+                const headerItems = items.filter((it: any) => it.transform[5] > 700 || it.width > 280);
+                const headerSet = new Set(headerItems);
+                const bodyItems = items.filter((it: any) => !headerSet.has(it));
+
+                const leftCol = bodyItems.filter((it: any) => it.transform[4] < midX);
+                const rightCol = bodyItems.filter((it: any) => it.transform[4] >= midX);
+
+                headerItems.sort(sortFn);
+                leftCol.sort(sortFn);
+                rightCol.sort(sortFn);
+
+                return buildTextFromSortedItems([...headerItems, ...leftCol, ...rightCol]);
+              }
+
+              // Single column or standard page
+              const sorted = [...items].sort(sortFn);
+              return buildTextFromSortedItems(sorted);
+            });
+          },
+        });
         text = parsed.text || "";
       } catch (err: any) {
         return res.status(422).json({ error: `Error parsing PDF: ${err.message}` });
@@ -210,6 +295,18 @@ app.post("/api/translate", async (req: Request, res: Response) => {
 
     const resolvedModel = resolveGeminiModel(modelName);
 
+async function withTimeout<T>(promise: Promise<T>, ms = 15000): Promise<T> {
+  let timer: any;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Timeout excedido")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
     // Mode 1: Gemini Direct
     if (mode === "gemini" && effectiveApiKey) {
       try {
@@ -224,10 +321,13 @@ Devuelve ÚNICAMENTE el texto traducido, sin comentarios adicionales, sin introd
 
 ${text}`;
 
-        const response = await ai.models.generateContent({
-          model: resolvedModel,
-          contents: prompt,
-        });
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: resolvedModel,
+            contents: prompt,
+          }),
+          15000
+        );
 
         const translatedText = response.text?.trim();
         if (translatedText && translatedText.length > 50) {
@@ -259,10 +359,13 @@ ${text}
 
 Devuelve el documento completamente traducido. Al final incluye la sección "### REFERENCIAS" con las citas originales intactas.`;
 
-        const response = await ai.models.generateContent({
-          model: resolvedModel,
-          contents: agentPrompt,
-        });
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: resolvedModel,
+            contents: agentPrompt,
+          }),
+          15000
+        );
 
         const translatedText = response.text?.trim();
         if (translatedText && translatedText.length > 50) {

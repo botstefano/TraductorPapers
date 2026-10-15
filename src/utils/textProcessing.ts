@@ -83,40 +83,95 @@ export function splitBodyAndReferences(fullText: string): { bodyText: string; re
   };
 }
 
+export function cleanAcademicText(raw: string): string {
+  if (!raw) return "";
+
+  let cleaned = raw
+    // Rejoin words broken by hyphens across linebreaks (e.g., "repre-\nsentation" -> "representation")
+    .replace(/([a-zA-Z]{2,})-\s*\r?\n\s*([a-zA-Z]{2,})/g, "$1$2")
+    // Remove arXiv headers like "arXiv:2301.12345v1 [cs.CL] 15 Jan 2023"
+    .replace(/arXiv:\d{4}\.\d{4,5}(?:v\d+)?\s*(?:\[[^\]]+\])?\s*(?:\d{1,2}\s+[A-Za-z]+\s+\d{4})?/gi, "")
+    // Remove "Page X of Y" or "Page X"
+    .replace(/(?:^|\n)\s*page\s+\d+(?:\s*(?:of|\/)\s*\d+)?\s*(?=\n|$)/gi, "\n")
+    // Remove standalone running header/footer page numbers (e.g., single digit or 2-3 digit line at boundary)
+    .replace(/(?:^|\n)\s*\d{1,3}\s*(?=\n)/g, "\n")
+    // Remove conference boilerplate (e.g. "Preprint. Under review.", "IEEE TRANSACTIONS ON...")
+    .replace(/(?:^|\n)\s*(?:preprint|accepted as a conference paper|under review)[^\n]*\n/gi, "\n")
+    // Normalize multiple consecutive blank lines into double newline
+    .replace(/\n{3,}/g, "\n\n");
+
+  return cleaned.trim();
+}
+
 export function parseReferenceItems(referencesBlock: string): string[] {
   if (!referencesBlock.trim()) return [];
 
-  // Match [1] or 1.
-  const regex = /(?:^|\n)\s*(?:\[\d+\]|\d+\.)\s+([\s\S]+?)(?=(?:\n\s*(?:\[\d+\]|\d+\.)\s+)|\Z)/g;
-  const items: string[] = [];
-  let match: RegExpExecArray | null;
+  const cleanedBlock = referencesBlock
+    .replace(/^.*?(?:references|bibliography|bibliografía|referencias)\s*\n/i, "")
+    .trim();
 
-  while ((match = regex.exec(referencesBlock)) !== null) {
-    const clean = match[1].replace(/\n+/g, " ").trim();
-    if (clean.length > 5) {
-      items.push(clean);
+  // Pattern A: Numbered bracket style "[1] ...", "[2] ..."
+  const bracketRegex = /(?:^|\n)\s*\[(\d+)\]\s+([\s\S]+?)(?=(?:\n\s*\[\d+\])|\Z)/g;
+  const bracketMatches: string[] = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = bracketRegex.exec(cleanedBlock)) !== null) {
+    const text = m[2].replace(/\n+/g, " ").trim();
+    if (text.length > 8) {
+      bracketMatches.push(`[${m[1]}] ${text}`);
     }
   }
 
-  if (items.length > 0) {
-    return items;
+  if (bracketMatches.length >= 2) {
+    return bracketMatches;
   }
 
-  // Fallback: split by double newline
-  const paragraphs = referencesBlock
+  // Pattern B: Numbered period style "1. ...", "2. ..."
+  const numberedRegex = /(?:^|\n)\s*(\d{1,3})\.\s+([\s\S]+?)(?=(?:\n\s*\d{1,3}\.)|\Z)/g;
+  const numberedMatches: string[] = [];
+
+  while ((m = numberedRegex.exec(cleanedBlock)) !== null) {
+    const text = m[2].replace(/\n+/g, " ").trim();
+    if (text.length > 8) {
+      numberedMatches.push(`${m[1]}. ${text}`);
+    }
+  }
+
+  if (numberedMatches.length >= 2) {
+    return numberedMatches;
+  }
+
+  // Pattern C: APA / Harvard / Author-Year style
+  // Matches references starting with Author names and containing (19XX) or (20XX)
+  const apaRegex = /(?:^|\n)\s*([A-Z][A-Za-zÀ-ÿ'\-]+,\s+[A-Z]\.[\s\S]+?\((?:19|20)\d{2}[a-z]?\)[\s\S]+?)(?=(?:\n\s*[A-Z][A-Za-zÀ-ÿ'\-]+,\s+[A-Z]\.)|\Z)/g;
+  const apaMatches: string[] = [];
+
+  while ((m = apaRegex.exec(cleanedBlock)) !== null) {
+    const text = m[1].replace(/\n+/g, " ").trim();
+    if (text.length > 15) {
+      apaMatches.push(text);
+    }
+  }
+
+  if (apaMatches.length >= 2) {
+    return apaMatches;
+  }
+
+  // Fallback: split by double newlines
+  const paragraphs = cleanedBlock
     .split(/\n\s*\n/)
     .map((s) => s.replace(/\n+/g, " ").trim())
-    .filter((s) => s.length > 15 && !REFERENCES_HEADERS.includes(s.toLowerCase()));
+    .filter((s) => s.length > 20 && !REFERENCES_HEADERS.includes(s.toLowerCase()));
 
   if (paragraphs.length > 0) {
     return paragraphs;
   }
 
   // Fallback 2: split by single lines that look like citations
-  return referencesBlock
+  return cleanedBlock
     .split("\n")
     .map((s) => s.trim())
-    .filter((s) => s.length > 20);
+    .filter((s) => s.length > 25);
 }
 
 // Levenshtein distance

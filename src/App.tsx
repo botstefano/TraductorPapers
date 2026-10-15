@@ -25,6 +25,7 @@ import {
   parseReferenceItems,
   crossCheckReferences,
   extractTitleFromText,
+  cleanAcademicText,
   type DocumentResult,
   type ReferenceMatch,
 } from "./utils/textProcessing";
@@ -70,12 +71,13 @@ export default function App() {
 
     if (ext === ".txt" || ext === ".md") {
       const text = await file.text();
-      const title = extractTitleFromText(text, file.name);
+      const cleaned = cleanAcademicText(text);
+      const title = extractTitleFromText(cleaned, file.name);
       return {
         id: `${file.name}-${Date.now()}-${Math.random()}`,
         name: file.name,
         size: file.size,
-        text,
+        text: cleaned,
         title,
       };
     }
@@ -102,12 +104,13 @@ export default function App() {
     }
 
     const data = await res.json();
-    const title = extractTitleFromText(data.text, file.name);
+    const cleaned = cleanAcademicText(data.text);
+    const title = extractTitleFromText(cleaned, file.name);
     return {
       id: `${file.name}-${Date.now()}-${Math.random()}`,
       name: file.name,
       size: file.size,
-      text: data.text,
+      text: cleaned,
       title,
     };
   };
